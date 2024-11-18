@@ -8,6 +8,17 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Function to print usage
+print_usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo "Options:"
+    echo "  -n, --namespace <namespace>     Process only the specified namespace"
+    echo "  --exclude-ns <ns1> <ns2>...    Exclude specified namespaces"
+    echo "  -h, --help                     Show this help message"
+    echo ""
+    echo "If no options are provided, all namespaces will be processed."
+}
+
 # Function to print horizontal line
 print_line() {
     printf "%80s\n" | tr " " "-"
@@ -79,7 +90,7 @@ get_resources() {
     # Get hpa
     echo -e "\n${YELLOW}Hpa:${NC}"
     kubectl get hpa -n "$namespace" -o custom-columns=NAME:.metadata.name,TARGETS:.spec.metrics[].resource.name,TARGETS:.spec.metrics[].resource.target.averageUtilization --no-headers
-    
+
     # Get services
     echo -e "\n${YELLOW}Services:${NC}"
     kubectl get services -n "$namespace" -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,CLUSTER-IP:.spec.clusterIP,EXTERNAL-IP:.spec.externalIPs --no-headers
@@ -87,7 +98,7 @@ get_resources() {
     # Get Ingress
     echo -e "\n${YELLOW}Ingress:${NC}"
     kubectl get ingress -n "$namespace" -o custom-columns=NAME:.metadata.name,HOSTS:.spec.rules[*].host --no-headers
-    
+
     # Get pods
     echo -e "\n${YELLOW}Pods:${NC}"
     kubectl get pods -n "$namespace" -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,NODE:.spec.nodeName --no-headers
@@ -176,6 +187,40 @@ show_resource_relationships() {
     done
 }
 
+# Parse command line arguments
+NAMESPACE=""
+EXCLUDE_NS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -n|--namespace)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                echo -e "${RED}Error: Namespace argument is missing${NC}"
+                print_usage
+                exit 1
+            fi
+            NAMESPACE="$2"
+            shift 2
+            ;;
+        --exclude-ns)
+            shift
+            while [[ $# -gt 0 && ! "$1" == -* ]]; do
+                EXCLUDE_NS+=("$1")
+                shift
+            done
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Error: Unknown option: $1${NC}"
+            print_usage
+            exit 1
+            ;;
+    esac
+done
+
 # Main execution
 echo -e "${GREEN}Kubernetes Resource Mapper${NC}"
 print_line
@@ -191,11 +236,43 @@ if ! command -v kubectl &> /dev/null; then
     exit 1
 fi
 
-# Get all namespaces
-namespaces=$(kubectl get namespaces -o name)
+# Get namespaces based on filters
+if [[ -n "$NAMESPACE" ]]; then
+    # Check if specified namespace exists
+    if ! kubectl get namespace "$NAMESPACE" &>/dev/null; then
+        echo -e "${RED}Error: Namespace '$NAMESPACE' not found${NC}"
+        exit 1
+    fi
+    namespaces="namespace/$NAMESPACE"
+else
+    namespaces=$(kubectl get namespaces -o name)
 
-# Process each namespace
-for ns in $namespaces; do
+    # Apply exclusion filter if specified
+    if [[ ${#EXCLUDE_NS[@]} -gt 0 ]]; then
+        filtered_namespaces=""
+        while IFS= read -r ns; do
+            ns_name=${ns#namespace/}
+            exclude=false
+            for excluded in "${EXCLUDE_NS[@]}"; do
+                if [[ "$ns_name" == "$excluded" ]]; then
+                    exclude=true
+                    break
+                fi
+            done
+            if ! $exclude; then
+                filtered_namespaces+="$ns"$'\n'
+            fi
+        done <<< "$namespaces"
+        namespaces="$filtered_namespaces"
+    fi
+fi
+
+# Process namespaces
+while IFS= read -r ns; do
+    if [[ -z "$ns" ]]; then
+        continue
+    fi
+
     namespace=${ns#namespace/}
     print_line
     echo -e "${RED}Analyzing namespace: $namespace${NC}"
@@ -214,6 +291,6 @@ for ns in $namespaces; do
     show_configmap_usage "$namespace"
 
     print_line
-done
+done <<< "$namespaces"
 
 echo -e "${GREEN}Resource mapping complete!${NC}"
