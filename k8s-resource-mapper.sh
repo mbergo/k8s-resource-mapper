@@ -76,6 +76,10 @@ get_resources() {
     echo -e "\n${YELLOW}Deployments:${NC}"
     kubectl get deployments -n "$namespace" -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.replicas,AVAILABLE:.status.availableReplicas --no-headers
 
+    # Get hpa
+    echo -e "\n${YELLOW}Hpa:${NC}"
+    kubectl get hpa -n "$namespace" -o custom-columns=NAME:.metadata.name,TARGETS:.spec.metrics[].resource.name,TARGETS:.spec.metrics[].resource.target.averageUtilization --no-headers
+    
     # Get services
     echo -e "\n${YELLOW}Services:${NC}"
     kubectl get services -n "$namespace" -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,CLUSTER-IP:.spec.clusterIP,EXTERNAL-IP:.spec.externalIPs --no-headers
