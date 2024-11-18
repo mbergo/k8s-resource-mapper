@@ -23,117 +23,48 @@ create_arrow() {
     echo "${arrow}>"
 }
 
-# Function to get all namespaces
-get_namespaces() {
-    echo -e "${BLUE}Fetching namespaces...${NC}"
-    kubectl get namespaces -o custom-columns=NAME:.metadata.name --no-headers
-}
-
-# Function to get ConfigMap details
-get_configmap_details() {
+# Function to show ConfigMap usage
+show_configmap_usage() {
     local namespace=$1
-    local configmap=$2
+    echo -e "\n${CYAN}ConfigMap usage in namespace: $namespace${NC}"
 
-    echo -e "\n${CYAN}ConfigMap: $configmap${NC}"
+    local configmaps=$(kubectl get configmaps -n "$namespace" -o name)
+    for cm in $configmaps; do
+        cm_name=${cm#configmap/}
+        echo -e "\nConfigMap: $cm_name"
 
-    # Get ConfigMap data
-    local data=$(kubectl get configmap "$configmap" -n "$namespace" -o json)
+        # Find pods using this ConfigMap as volumes
+        local volume_pods=$(kubectl get pods -n "$namespace" -o json | jq -r --arg name "$cm_name" '.items[] | select(.spec.volumes[]?.configMap.name == $name) | .metadata.name')
 
-    # Extract and display data fields
-    echo "├── Data Keys:"
-    echo "$data" | jq -r '.data | keys[]' 2>/dev/null | while read -r key; do
-        echo "│   ├── $key"
-        # Get value but limit to first 100 characters
-        local value=$(echo "$data" | jq -r ".data[\"$key\"]" | head -c 100)
-        echo "│   │   └── Value: ${value}..."
-    done
+        # Find pods using this ConfigMap in envFrom
+        local env_from_pods=$(kubectl get pods -n "$namespace" -o json | jq -r --arg name "$cm_name" '.items[] | select(.spec.containers[].envFrom[]?.configMapRef.name == $name) | .metadata.name')
 
-    # Find pods using this ConfigMap
-    echo "└── Used by Pods:"
-    kubectl get pods -n "$namespace" -o json | jq -r ".items[] | select(.spec.volumes[]?.configMap.name == \"$configmap\" or .spec.containers[].envFrom[]?.configMapRef.name == \"$configmap\") | .metadata.name" | while read -r pod; do
-        if [ ! -z "$pod" ]; then
-            echo "    $(create_arrow 4) $pod"
-        fi
-    done
-}
+        # Find pods using this ConfigMap in env valueFrom
+        local env_value_pods=$(kubectl get pods -n "$namespace" -o json | jq -r --arg name "$cm_name" '.items[] | select(.spec.containers[].env[]?.valueFrom.configMapKeyRef.name == $name) | .metadata.name')
 
-# Function to get application interconnections
-get_app_connections() {
-    local namespace=$1
-    echo -e "\n${BLUE}Mapping application interconnections in namespace: $namespace${NC}"
+        # Combine and deduplicate results
+        local all_pods=$(echo -e "${volume_pods}\n${env_from_pods}\n${env_value_pods}" | sort -u | grep -v '^$')
 
-    # Get all pods
-    local pods=$(kubectl get pods -n "$namespace" -o json)
+        if [ ! -z "$all_pods" ]; then
+            echo "└── Used by pods:"
+            echo "$all_pods" | while read pod; do
+                if [ ! -z "$pod" ]; then
+                    echo "    $(create_arrow 4) $pod"
 
-    # Create temporary files for the graph
-    local tmp_dir=$(mktemp -d)
-    local graph_file="$tmp_dir/graph.txt"
-    local nodes_file="$tmp_dir/nodes.txt"
-
-    echo "digraph G {" > "$graph_file"
-    echo '    rankdir=LR;' >> "$graph_file"
-    echo '    node [shape=box];' >> "$graph_file"
-
-    # Process each pod
-    echo "$pods" | jq -r '.items[] | select(.status.phase=="Running")' | while read -r pod; do
-        local pod_name=$(echo "$pod" | jq -r '.metadata.name')
-        local app_label=$(echo "$pod" | jq -r '.metadata.labels.app // .metadata.labels["app.kubernetes.io/name"] // .metadata.name')
-
-        # Add node
-        echo "    \"$app_label\" [label=\"$app_label\"];" >> "$graph_file"
-        echo "$app_label" >> "$nodes_file"
-
-        # Get container environment variables that reference services
-        echo "$pod" | jq -r '.spec.containers[].env[]? | select(.valueFrom.configMapKeyRef != null) | .valueFrom.configMapKeyRef.name' | while read -r configmap; do
-            if [ ! -z "$configmap" ]; then
-                echo "    \"$app_label\" -> \"ConfigMap: $configmap\" [color=blue];" >> "$graph_file"
-            fi
-        done
-
-        # Get service connections from environment variables
-        echo "$pod" | jq -r '.spec.containers[].env[]? | select(.value != null) | .value' | grep -o '[a-zA-Z0-9-]\+\.[a-zA-Z0-9-]\+\.svc\.cluster\.local' | while read -r svc; do
-            local service_name=$(echo "$svc" | cut -d. -f1)
-            if [ ! -z "$service_name" ]; then
-                echo "    \"$app_label\" -> \"Service: $service_name\" [color=green];" >> "$graph_file"
-            fi
-        done
-    done
-
-    # Add services and their connections
-    kubectl get services -n "$namespace" -o json | jq -r '.items[]' | while read -r service; do
-        local service_name=$(echo "$service" | jq -r '.metadata.name')
-        local selector=$(echo "$service" | jq -r '.spec.selector | to_entries | map(.key + "=" + .value) | join(",")')
-
-        if [ ! -z "$selector" ]; then
-            kubectl get pods -n "$namespace" -l "$selector" -o json | jq -r '.items[].metadata.labels.app // .items[].metadata.labels["app.kubernetes.io/name"] // .items[].metadata.name' | while read -r app; do
-                if [ ! -z "$app" ]; then
-                    echo "    \"Service: $service_name\" -> \"$app\" [color=red];" >> "$graph_file"
+                    # Show how the ConfigMap is used
+                    if echo "$volume_pods" | grep -q "^${pod}$"; then
+                        echo "        - Mounted as volume"
+                    fi
+                    if echo "$env_from_pods" | grep -q "^${pod}$"; then
+                        echo "        - Used in envFrom"
+                    fi
+                    if echo "$env_value_pods" | grep -q "^${pod}$"; then
+                        echo "        - Used in environment variables"
+                    fi
                 fi
             done
         fi
     done
-
-    echo "}" >> "$graph_file"
-
-    # Display ASCII representation of the graph
-    echo -e "\n${YELLOW}Application Interconnections:${NC}"
-    echo -e "Legend:"
-    echo -e "→ Service dependency"
-    echo -e "⇢ ConfigMap usage"
-    echo -e "⇾ Service exposure"
-    echo ""
-
-    # Create simple ASCII representation
-    while read -r node; do
-        echo "[$node]"
-        grep "\"$node\" ->" "$graph_file" | while read -r connection; do
-            target=$(echo "$connection" | grep -o '"[^"]*"' | tail -n 1 | tr -d '"')
-            echo "  $(create_arrow 4) $target"
-        done
-    done < "$nodes_file"
-
-    # Cleanup
-    rm -rf "$tmp_dir"
 }
 
 # Function to get all resources in a namespace
@@ -153,18 +84,88 @@ get_resources() {
     echo -e "\n${YELLOW}Pods:${NC}"
     kubectl get pods -n "$namespace" -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,NODE:.spec.nodeName --no-headers
 
-    # Get and show detailed ConfigMap information
+    # Get configmaps
     echo -e "\n${YELLOW}ConfigMaps:${NC}"
-    local configmaps=$(kubectl get configmaps -n "$namespace" -o custom-columns=NAME:.metadata.name --no-headers)
-    while IFS= read -r configmap; do
-        if [ ! -z "$configmap" ]; then
-            get_configmap_details "$namespace" "$configmap"
+    kubectl get configmaps -n "$namespace" -o custom-columns=NAME:.metadata.name --no-headers
+}
+
+# Function to map service connections
+map_service_connections() {
+    local namespace=$1
+    echo -e "\n${BLUE}Service connections in namespace: $namespace${NC}"
+
+    # Get all services
+    local services=$(kubectl get services -n "$namespace" -o name)
+    for service in $services; do
+        service_name=${service#service/}
+        echo -e "\n${YELLOW}Service: $service_name${NC}"
+
+        # Get service selectors
+        local selectors=$(kubectl get service "$service_name" -n "$namespace" -o jsonpath='{.spec.selector}' 2>/dev/null)
+        if [ ! -z "$selectors" ]; then
+            echo "├── Selectors: $selectors"
+
+            # Get pods matching selectors
+            local selector_query=$(echo $selectors | jq -r 'to_entries | map(.key + "=" + .value) | join(",")')
+            local pods=$(kubectl get pods -n "$namespace" -l "$selector_query" -o name 2>/dev/null)
+            if [ ! -z "$pods" ]; then
+                echo "└── Connected Pods:"
+                for pod in $pods; do
+                    pod_name=${pod#pod/}
+                    echo "    $(create_arrow 4) $pod_name"
+                done
+            fi
         fi
-    done <<< "$configmaps"
+    done
+}
+
+# Function to show resource relationships
+show_resource_relationships() {
+    local namespace=$1
+    echo -e "\n${BLUE}Resource relationships in namespace: $namespace${NC}\n"
+
+    echo "External Traffic"
+    echo "│"
 
     # Get ingresses
-    echo -e "\n${YELLOW}Ingresses:${NC}"
-    kubectl get ingress -n "$namespace" -o custom-columns=NAME:.metadata.name,HOSTS:.spec.rules[*].host --no-headers 2>/dev/null
+    local ingresses=$(kubectl get ingress -n "$namespace" -o name 2>/dev/null)
+    if [ ! -z "$ingresses" ]; then
+        echo "▼"
+        echo "[Ingress Layer]"
+        for ingress in $ingresses; do
+            ingress_name=${ingress#ingress.networking.k8s.io/}
+            echo "├── $ingress_name"
+
+            # Get backend services for this ingress
+            local backends=$(kubectl get ingress "$ingress_name" -n "$namespace" -o json | \
+                           jq -r '.spec.rules[].http.paths[].backend.service.name' 2>/dev/null)
+            for backend in $backends; do
+                if [ ! -z "$backend" ]; then
+                    echo "│   $(create_arrow 4) Service: $backend"
+                fi
+            done
+        done
+        echo "│"
+    fi
+
+    echo "▼"
+    echo "[Service Layer]"
+    local services=$(kubectl get services -n "$namespace" -o name)
+    for service in $services; do
+        service_name=${service#service/}
+        echo "├── $service_name"
+
+        # Get pods for this service
+        local selector=$(kubectl get service "$service_name" -n "$namespace" -o jsonpath='{.spec.selector}' 2>/dev/null)
+        if [ ! -z "$selector" ]; then
+            local selector_query=$(echo $selector | jq -r 'to_entries | map(.key + "=" + .value) | join(",")')
+            local pods=$(kubectl get pods -n "$namespace" -l "$selector_query" -o name 2>/dev/null)
+            for pod in $pods; do
+                pod_name=${pod#pod/}
+                echo "│   $(create_arrow 4) Pod: $pod_name"
+            done
+        fi
+    done
 }
 
 # Main execution
@@ -177,24 +178,34 @@ if ! command -v jq &> /dev/null; then
     exit 1
 fi
 
+if ! command -v kubectl &> /dev/null; then
+    echo -e "${RED}Error: kubectl is required but not installed.${NC}"
+    exit 1
+fi
+
 # Get all namespaces
-namespaces=$(get_namespaces)
+namespaces=$(kubectl get namespaces -o name)
 
 # Process each namespace
-while IFS= read -r namespace; do
-    if [ ! -z "$namespace" ]; then
-        print_line
-        echo -e "${RED}Analyzing namespace: $namespace${NC}"
-        print_line
+for ns in $namespaces; do
+    namespace=${ns#namespace/}
+    print_line
+    echo -e "${RED}Analyzing namespace: $namespace${NC}"
+    print_line
 
-        # Get all resources
-        get_resources "$namespace"
+    # Get all resources
+    get_resources "$namespace"
 
-        # Get application interconnections
-        get_app_connections "$namespace"
+    # Map service connections
+    map_service_connections "$namespace"
 
-        print_line
-    fi
-done <<< "$namespaces"
+    # Show resource relationships
+    show_resource_relationships "$namespace"
+
+    # Show ConfigMap usage
+    show_configmap_usage "$namespace"
+
+    print_line
+done
 
 echo -e "${GREEN}Resource mapping complete!${NC}"

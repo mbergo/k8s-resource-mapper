@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-config
+data:
+  default.conf: |
+    server {
+        listen 80;
+        location /auth/ {
+            proxy_pass http://auth-service:8080/;
+        }
+        location /products/ {
+            proxy_pass http://product-service:8081/;
+        }
+    }

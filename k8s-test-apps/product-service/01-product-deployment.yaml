@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  labels:
+    app: product-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: product-service
+  template:
+    metadata:
+      labels:
+        app: product-service
+    spec:
+      containers:
+      - name: product-service
+        image: nginx:alpine
+        ports:
+        - containerPort: 8081
+        env:
+        - name: AUTH_SERVICE_URL
+          value: "http://auth-service:8080"
+        - name: DB_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: product-service-config
+              key: database-url
+      serviceAccountName: product-service-account

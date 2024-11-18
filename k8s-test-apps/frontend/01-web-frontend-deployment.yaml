@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-frontend
+  labels:
+    app: web-frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-frontend
+  template:
+    metadata:
+      labels:
+        app: web-frontend
+    spec:
+      containers:
+      - name: web-frontend
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        env:
+        - name: AUTH_SERVICE_URL
+          value: "http://auth-service:8080"
+        - name: PRODUCT_SERVICE_URL
+          value: "http://product-service:8081"
+        volumeMounts:
+        - name: frontend-config
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: frontend-config
+        configMap:
+          name: frontend-config
