@@ -80,6 +80,10 @@ get_resources() {
     echo -e "\n${YELLOW}Services:${NC}"
     kubectl get services -n "$namespace" -o custom-columns=NAME:.metadata.name,TYPE:.spec.type,CLUSTER-IP:.spec.clusterIP,EXTERNAL-IP:.spec.externalIPs --no-headers
 
+    # Get Ingress
+    echo -e "\n${YELLOW}Ingress:${NC}"
+    kubectl get ingress -n "$namespace" -o custom-columns=NAME:.metadata.name,HOSTS:.spec.rules[*].host --no-headers
+    
     # Get pods
     echo -e "\n${YELLOW}Pods:${NC}"
     kubectl get pods -n "$namespace" -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,NODE:.spec.nodeName --no-headers
